@@ -14,9 +14,10 @@ app.MapGet("/", () => "Hello World!");
 
 // lets drop the concept with RequestHandlers and make it EndpointHandlers
 
-app.UseEndpoints(app => app.MapGet("/test", EndpointHandler.Delegate<ReadRessourceHandler, int, MyResponse>()));
-app.UseEndpoints(app => app.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
-app.UseEndpoints(app => app.MapGet("/items", EndpointHandler.Delegate<ListItemsHandler, object?, IEnumerable<Item>>()));
+app.UseEndpoints(configure => configure.MapGet("/test", EndpointHandler.Delegate<ReadRessourceHandler, int, MyResponse>()));
+app.UseEndpoints(configure => configure.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
+//app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.Delegate<ListItemsHandler, object?, IEnumerable<Item>>()));
+app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.AutoDelegate<ListItemsHandler>()));
 
 // Add Crud
 app.AddCrud<Item>("/item", x =>
@@ -24,6 +25,8 @@ app.AddCrud<Item>("/item", x =>
     x.AddCreate<ItemCreateHandler>();
     x.AddRead<ItemReadHandler, int>();
 });
+
+
 
 app.Run();
 
@@ -47,6 +50,29 @@ public sealed class EndpointHandler
     //    }
     //}
 
+
+    public static RequestDelegate AutoDelegate<THandler>()
+    {
+        var handlerType = typeof(THandler);
+
+        // handler must be IHandler<,>
+        // TODO need to do a sh*tload of checks in this method
+
+        var genericArguments = handlerType.GetInterfaces()
+            .Where(x => x.GetGenericTypeDefinition() == typeof(IHandler<,>))
+            .First()
+            ?.GetGenericArguments();
+
+        var requestType = genericArguments[0];
+        var resposeType = genericArguments[1];
+
+        var method = typeof(EndpointHandler).GetMethod("Delegate", 3, new Type[] { typeof(HandlingOptions) });
+        
+        method = method!.MakeGenericMethod(handlerType, genericArguments[0], genericArguments[1]);
+
+        return (RequestDelegate)method.Invoke(null, parameters: new object?[] { null });
+    }
+    
     public static RequestDelegate Delegate<THandler, TRequest, TResponse>(HandlingOptions? options = null) where THandler : IHandler<TRequest, TResponse>
     {
 
