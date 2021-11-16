@@ -1,3 +1,4 @@
+using System.Web;
 using WebApi.Crud;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -15,9 +16,11 @@ app.MapGet("/", () => "Hello World!");
 // lets drop the concept with RequestHandlers and make it EndpointHandlers
 
 app.UseEndpoints(configure => configure.MapGet("/test", EndpointHandler.Delegate<ReadRessourceHandler, int, MyResponse>()));
-app.UseEndpoints(configure => configure.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
+//app.UseEndpoints(configure => configure.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
 //app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.Delegate<ListItemsHandler, object?, IEnumerable<Item>>()));
 app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.AutoDelegate<ListItemsHandler>()));
+
+app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get);
 
 // Add Crud
 app.AddCrud<Item>("/item", x =>
@@ -31,25 +34,18 @@ app.AddCrud<Item>("/item", x =>
 app.Run();
 
 
-public sealed class EndpointHandler 
+public static class EndpointHandler 
 {
-    //public static async Task Delegate<THandler, TRequest, TResponse>(HttpContext context) where THandler : IHandler<TRequest, TResponse>
-    //{
-    //    var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
+    public static WebApplication? UseEndpointHandler<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<IEndpointRouteBuilder>? configure = null)
+    {
+        webApplication?.UseEndpoints(builder =>
+        {
+            builder.MapMethods(pattern, new[] { httpMethod.Method }, AutoDelegate<THandler>());
+            configure?.Invoke(builder);
+        });
 
-    //    // If TRequest nullable then we should accept no input ! 
-    //    // Also request should be able to come from body, querystring, routevalues and form? that'll be fun to implement
-    //    var request = await context.Request.ReadFromJsonAsync<TRequest>() ?? throw new ArgumentException($"Could not read {typeof(TRequest).Name} from request body");
-
-    //    var handler = context.RequestServices.GetRequiredService<THandler>();
-    //    var response = await handler.HandleAsync(request, CancellationToken.None);
-
-    //    if (response != null)
-    //    {
-    //        await context.Response.WriteAsJsonAsync(response);
-    //    }
-    //}
-
+        return webApplication;
+    }
 
     public static RequestDelegate AutoDelegate<THandler>()
     {
@@ -82,6 +78,7 @@ public sealed class EndpointHandler
         {
             var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
 
+            IRequestReader reader = new DefaultReader(); ;
             var httpRequest = context.Request;
             TRequest request = default!;
 
@@ -89,25 +86,26 @@ public sealed class EndpointHandler
             switch (options?.DeserializeRequestFrom)
             {
                 case HandlingOptions.RequestOrigin.QueryString:
+                    reader = new QueryStringReader();
                     break;
                 case HandlingOptions.RequestOrigin.RouteValues:
-                    (_, request) = await new RouteValueRequestReader().TryReadAsync<TRequest>(httpRequest);
+                    reader = new RouteValueReader();
                     break;
                 case HandlingOptions.RequestOrigin.Form:
-                    break;
+                    throw new NotSupportedException(":(");
                 case HandlingOptions.RequestOrigin.TryThemAll:
-                    break;
+                    throw new NotSupportedException(":(");
                 default:
-                    (_, request) = await new JsonRequestReader().TryReadAsync<TRequest>(httpRequest);
+                    reader = new JsonRequestReader();
                     break;
             }
 
-            if( request == null && Nullable.GetUnderlyingType(typeof(TRequest)) != null)
+            request = await reader.ReadAsync<TRequest>(httpRequest);
+
+            if (request == null && Nullable.GetUnderlyingType(typeof(TRequest)) == null)
             {
-                throw new ArgumentException($"Failed to read {typeof(TRequest).Name} from HTTP request");
+                throw new ArgumentException($"Failed to deserialze object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
             }
-                       
-            
                         
             var handler = context.RequestServices.GetRequiredService<THandler>();
             var response = await handler.HandleAsync(request, CancellationToken.None);
@@ -118,59 +116,89 @@ public sealed class EndpointHandler
             }
         });
     }
-
-
-    // Can we make a method that does not need to specify the TRequest and TResponse explicit ?
-
-    // app.UseEndpoints(app => app.MapGet("/items", EndpointHandler.Delegate<ListItemsHandler>())); 
 }
 
-public class JsonRequestReader
+public interface IRequestReader
 {
-    // Do a better API and pack it away
-    public async Task<(bool, T)> TryReadAsync<T>(HttpRequest request)
+    Task<T> ReadAsync<T>(HttpRequest httpRequest);
+}
+
+public class DefaultReader : IRequestReader
+{
+    public Task<T> ReadAsync<T>(HttpRequest httpRequest)
     {
-        try
-        {
-            var value = await request.ReadFromJsonAsync<T>();
-
-            return (value != null, value!);
-        }
-        catch
-        {
-            // buhuu do this smarter
-        }
-
-        return (false, default!);
+        return Task.FromResult<T>(default!);
     }
 }
 
-public class RouteValueRequestReader
+public class QueryStringReader : IRequestReader
 {
-#pragma warning disable CS1998 // Async method lacks 'await' operators and will run synchronously
-    public async Task<(bool, T)> TryReadAsync<T>(HttpRequest request)
-#pragma warning restore CS1998 // Async method lacks 'await' operators and will run synchronously
+    public Task<T> ReadAsync<T>(HttpRequest httpRequest)
     {
-        var value = request.RouteValues.FirstOrDefault().Value;
+        string responseString = httpRequest.QueryString.ToString();
+        var dict = HttpUtility.ParseQueryString(responseString);
 
+        // TODO if we only have one value and T is an basic value type, then return the value directly
+        // we could share that logic with the Route value reader.. and also the json part can be used to deserialize into 
+        // a complex type for both readers
+
+        string json = System.Text.Json.JsonSerializer.Serialize(dict.Cast<string>().ToDictionary(k => k, v => dict[v]));
+
+        return Task.FromResult(System.Text.Json.JsonSerializer.Deserialize<T>(json)!);
+    }
+}
+
+public class RouteValueReader : IRequestReader
+{
+    public Task<T> ReadAsync<T>(HttpRequest httpRequest)
+    {
+        T result = default!;
+
+        var value = httpRequest.RouteValues.FirstOrDefault().Value;
         if (value != default)
         {
             if (typeof(T) == typeof(int) && value is string str)
             {
                 object integer = Convert.ToInt32(str);
 
-                return (true, (T)integer);
+                result = (T)integer;
             }
-             
-            if(typeof(T) == typeof(string) && value is string)
+
+            if (typeof(T) == typeof(string) && value is string)
             {
-                return (true, (T)value);
+                result = (T)value;
             }
+
+            // handle guid ? is that valid as a route param?
+
+            // T is a complex type deserialize into T using route names ?
         }
-        return (false, default!);
+
+        return Task.FromResult(result);
     }
 }
 
+
+public class JsonRequestReader : IRequestReader
+{
+    public async Task<T> ReadAsync<T>(HttpRequest httpRequest)
+    {
+        T result = default!;
+        try
+        {
+            var value = await httpRequest.ReadFromJsonAsync<T>();
+
+            result = value!;
+        }
+        catch
+        {
+            // buhuu do this smarter
+            result = default!;
+        }
+
+        return result;
+    }
+}
 
 public static class ServiceCollectionExtensions
 {
@@ -277,8 +305,6 @@ public sealed class ListItemsHandler : IHandler<object?, IEnumerable<Item>>
         return _items.Values.Values; // Values.Values :)
     }
 }
-
-
 
 
 
