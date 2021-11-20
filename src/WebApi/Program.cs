@@ -39,7 +39,6 @@ app.AddCrud<Item>("/item", x =>
 });
 
 
-
 app.Run();
 
 
@@ -50,10 +49,7 @@ public class HelloWorld : IHandler<HelloWorld.Nothing?, HelloWorld.Response>
         return Task.FromResult(new Response("world"));
     }
 
-    public sealed class Nothing
-    {
-
-    }
+    public sealed class Nothing {}
 
     public sealed class Response
     {
@@ -67,18 +63,45 @@ public class HelloWorld : IHandler<HelloWorld.Nothing?, HelloWorld.Response>
 }
 
 
-public static class RouteHandlerBuilderExtensions
+public sealed class RequestBuilder
 {
-    public static RouteHandlerBuilder? ModelFromQueryString(this RouteHandlerBuilder? builder)
+    public RequestBuilder AsOptional()
     {
-        return builder;
+        return this;
     }
 
-    public static RouteHandlerBuilder? ModelFromBody(this RouteHandlerBuilder? builder)
+    public RequestBuilder UseValue<T>(T value)
     {
-        return builder;
+        return this;
     }
+
+    public RequestBuilder FromQueryString(params string[] keys)
+    {
+        return this;
+    }
+
+    public RequestBuilder FromRoute(params string[] keys)
+    {
+        return this;
+    }
+
+    public RequestBuilder FromBody()
+    {
+        return this;
+    }
+
+    // construct the method that can do it, or keep the builder ?
+    //internal async Task<TRequest> CreateAsync<TRequest>(HttpRequest httpRequest)
+    //{
+        
+    //}
+
+    //internal Func<HttpRequest, Task<TRequest>> CreateBindingMethod()
+    //{
+
+    //}
 }
+
 
 public static class EndpointHandler 
 {
@@ -108,30 +131,31 @@ public static class EndpointHandler
     public static Delegate AutoDelegate<THandler>()
     {
         var handlerType = typeof(THandler);
-
-        // handler must be IHandler<,>
-        // TODO need to do a sh*tload of checks in this method
-
-        var genericArguments = handlerType.GetInterfaces()
+        var interfaceType = handlerType.GetInterfaces()
             .Where(x => x.GetGenericTypeDefinition() == typeof(IHandler<,>))
-            .First()
-            ?.GetGenericArguments();
+            .FirstOrDefault();
 
-        var requestType = genericArguments![0];
-        var responseType = genericArguments[1];
+        if(interfaceType == null)
+        {
+            throw new ArgumentException($"It is a requirement that <THandler> implement IHandler");
+        }
+        
+        var genericArguments = interfaceType?.GetGenericArguments()!;
 
+        // The first parameter in HandleAsync is the request.
         var requestParameter = handlerType.GetMethod(nameof(IHandler<int, int>.HandleAsync))!.GetParameters().First()!;
+        var options = new RequestOptions
+        {
+            RequestType = requestParameter.ParameterType,
+            Optional = IsOptional(requestParameter)
+        };
 
-        var optional = IsOptional(requestParameter);
+        // Make the RequestOptions buildable, With an Action<RequestOptionsBuilder>? configure ??? see configure RequestBuilder further up
 
-        var method = typeof(EndpointHandler).GetMethod("Delegate", 3, new Type[] { typeof(RequestOptions) });
-
-        var options = new RequestOptions { Optional = optional };
-
-        method = method!.MakeGenericMethod(handlerType, genericArguments[0], genericArguments[1]);
+        var method = typeof(EndpointHandler).GetMethod(nameof(Delegate), 3, new Type[] { typeof(RequestOptions) })!;
+        method = method.MakeGenericMethod(handlerType, genericArguments[0], genericArguments[1]);
 
         var parameters = new object?[] { options };
-
         var @delegate = method.Invoke(null, parameters: parameters)!;
                 
         return (Delegate)@delegate;
@@ -203,9 +227,9 @@ public static class EndpointHandler
 
             request = await reader.ReadAsync<TRequest>(httpRequest);
 
-            if (request == null && options?.Optional == true)
+            if (request == null && options?.Optional != true)
             {
-                throw new ArgumentException($"Failed to deserialze object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
+                throw new ArgumentException($"Failed to deserialze non optional object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
             }
                         
             var handler = context.RequestServices.GetRequiredService<THandler>();
@@ -323,6 +347,7 @@ public static class ServiceCollectionExtensions
 
 public sealed class RequestOptions
 {
+    public Type RequestType { get; set; } = null!;
     public bool Optional { get; set; }
 
     public enum RequestOrigin
