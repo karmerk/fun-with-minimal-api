@@ -1,3 +1,5 @@
+using System.Linq.Expressions;
+using System.Reflection;
 using System.Web;
 using WebApi.Crud;
 
@@ -16,11 +18,18 @@ app.MapGet("/", () => "Hello World!");
 // lets drop the concept with RequestHandlers and make it EndpointHandlers
 
 app.UseEndpoints(configure => configure.MapGet("/test", EndpointHandler.Delegate<ReadRessourceHandler, int, MyResponse>()));
+app.UseEndpoints(configure => configure.MapGet("/test2", EndpointHandler.UsingDelegateMethod<ReadRessourceHandler, int, MyResponse>()));
+
+app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, ReadRessourceHandler handler) => await handler.HandleAsync(id, CancellationToken.None)));
+
 //app.UseEndpoints(configure => configure.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
 //app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.Delegate<ListItemsHandler, object?, IEnumerable<Item>>()));
 app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.AutoDelegate<ListItemsHandler>()));
 
-app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get);
+//app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get);
+app.UseEndpointHandlerExperimental<MyHandler>("/bam", HttpMethod.Get, x => x.AllowAnonymous());
+
+app.UseEndpointHandler<HelloWorld>("/hello", HttpMethod.Get);
 
 // Add Crud
 app.AddCrud<Item>("/item", x =>
@@ -33,6 +42,43 @@ app.AddCrud<Item>("/item", x =>
 
 app.Run();
 
+
+public class HelloWorld : IHandler<HelloWorld.Nothing?, HelloWorld.Response>
+{
+    public Task<Response> HandleAsync(Nothing? request, CancellationToken cancellationToken)
+    {
+        return Task.FromResult(new Response("world"));
+    }
+
+    public sealed class Nothing
+    {
+
+    }
+
+    public sealed class Response
+    {
+        public string Hello { get; }
+
+        public Response(string hello)
+        {
+            Hello = hello;
+        }
+    }
+}
+
+
+public static class RouteHandlerBuilderExtensions
+{
+    public static RouteHandlerBuilder? ModelFromQueryString(this RouteHandlerBuilder? builder)
+    {
+        return builder;
+    }
+
+    public static RouteHandlerBuilder? ModelFromBody(this RouteHandlerBuilder? builder)
+    {
+        return builder;
+    }
+}
 
 public static class EndpointHandler 
 {
@@ -47,7 +93,19 @@ public static class EndpointHandler
         return webApplication;
     }
 
-    public static RequestDelegate AutoDelegate<THandler>()
+    public static WebApplication? UseEndpointHandlerExperimental<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<RouteHandlerBuilder>? configure = null)
+    {
+        webApplication?.UseEndpoints(endpoints =>
+        {
+            var builder = endpoints.MapMethods(pattern, new[] { httpMethod.Method }, (Delegate)AutoDelegate<THandler>());
+
+            configure?.Invoke(builder);
+        });
+
+        return webApplication;
+    }
+
+    public static Delegate AutoDelegate<THandler>()
     {
         var handlerType = typeof(THandler);
 
@@ -59,19 +117,62 @@ public static class EndpointHandler
             .First()
             ?.GetGenericArguments();
 
-        var requestType = genericArguments[0];
-        var resposeType = genericArguments[1];
+        var requestType = genericArguments![0];
+        var responseType = genericArguments[1];
 
-        var method = typeof(EndpointHandler).GetMethod("Delegate", 3, new Type[] { typeof(HandlingOptions) });
-        
+        var requestParameter = handlerType.GetMethod(nameof(IHandler<int, int>.HandleAsync))!.GetParameters().First()!;
+
+        var optional = IsOptional(requestParameter);
+
+        var method = typeof(EndpointHandler).GetMethod("Delegate", 3, new Type[] { typeof(RequestOptions) });
+
+        var options = new RequestOptions { Optional = optional };
+
         method = method!.MakeGenericMethod(handlerType, genericArguments[0], genericArguments[1]);
 
-        return (RequestDelegate)method.Invoke(null, parameters: new object?[] { null });
-    }
-    
-    public static RequestDelegate Delegate<THandler, TRequest, TResponse>(HandlingOptions? options = null) where THandler : IHandler<TRequest, TResponse>
-    {
+        var parameters = new object?[] { options };
 
+        var @delegate = method.Invoke(null, parameters: parameters)!;
+                
+        return (Delegate)@delegate;
+    }
+
+    private static bool IsOptional(ParameterInfo parameterInfo)
+    {
+        var context = new NullabilityInfoContext();
+        var nullabilityInfo = context.Create(parameterInfo);
+
+        return nullabilityInfo?.ReadState == NullabilityState.Nullable;
+    }
+
+    public static Delegate UsingDelegateMethod<THandler, TRequest, TResponse>() where THandler : IHandler<TRequest, TResponse>
+    {
+        // When using the delegate method, we can let, minimal api do all the work with the deserialization aso..
+        // but this also means that we are requred to use the attributes to ensure that argument match
+        
+        // In this case it means that the "request" argument will be deserialized from the querystring and must be called request
+        // this creates a dependency between the handler (in this case my endpoint handler) and the route.
+        return (async (TRequest request, THandler handler) =>
+        {
+           return await handler.HandleAsync(request, CancellationToken.None);
+        });
+
+        // The upside is that all the model binding is taken care of.
+        // https://github.com/dotnet/aspnetcore/blob/main/src/Http/Http.Extensions/src/RequestDelegateFactory.cs#L259
+
+        // Im having an existential cricis for this experimental playground, or at least the value of a EndpointHandler concept
+
+
+        // From above
+        // an integer is expected in the querystring, the UsingDelegateMethod defines this, the name is "request"
+        // app.UseEndpoints(configure => configure.MapGet("/test2", EndpointHandler.UsingDelegateMethod<ReadRessourceHandler, int, MyResponse>()));
+
+        // an integer is expected in the route, its defined in the route and the name must match the parameter in the delegate. this is the link
+        // app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, ReadRessourceHandler handler) => await handler.HandleAsync(id, CancellationToken.None)));
+    }
+
+    public static RequestDelegate Delegate<THandler, TRequest, TResponse>(RequestOptions? options = null) where THandler : IHandler<TRequest, TResponse>
+    {
         // use and rethink the whole options thing
 
         return new RequestDelegate(async (context) =>
@@ -85,15 +186,15 @@ public static class EndpointHandler
             // Also request should be able to come from body, querystring, routevalues and form? that'll be fun to implement
             switch (options?.DeserializeRequestFrom)
             {
-                case HandlingOptions.RequestOrigin.QueryString:
+                case RequestOptions.RequestOrigin.QueryString:
                     reader = new QueryStringReader();
                     break;
-                case HandlingOptions.RequestOrigin.RouteValues:
+                case RequestOptions.RequestOrigin.RouteValues:
                     reader = new RouteValueReader();
                     break;
-                case HandlingOptions.RequestOrigin.Form:
+                case RequestOptions.RequestOrigin.Form:
                     throw new NotSupportedException(":(");
-                case HandlingOptions.RequestOrigin.TryThemAll:
+                case RequestOptions.RequestOrigin.TryThemAll:
                     throw new NotSupportedException(":(");
                 default:
                     reader = new JsonRequestReader();
@@ -102,7 +203,7 @@ public static class EndpointHandler
 
             request = await reader.ReadAsync<TRequest>(httpRequest);
 
-            if (request == null && Nullable.GetUnderlyingType(typeof(TRequest)) == null)
+            if (request == null && options?.Optional == true)
             {
                 throw new ArgumentException($"Failed to deserialze object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
             }
@@ -220,8 +321,10 @@ public static class ServiceCollectionExtensions
 }
 
 
-public sealed class HandlingOptions
+public sealed class RequestOptions
 {
+    public bool Optional { get; set; }
+
     public enum RequestOrigin
     {
         Body,
