@@ -102,14 +102,16 @@ public sealed class RequestBuilder
     //}
 }
 
-
 public static class EndpointHandler 
 {
     public static WebApplication? UseEndpointHandler<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<RouteHandlerBuilder>? configure = null)
     {
         webApplication?.UseEndpoints(endpoints =>
         {
-            var builder = endpoints.MapMethods(pattern, new[] { httpMethod.Method }, AutoDelegate<THandler>());
+            var specification = EndpointHandlerSpecification.Create<THandler>();
+            var handler = specification.Build();
+            
+            var builder = endpoints.MapMethods(pattern, new[] { httpMethod.Method }, handler);
 
             configure?.Invoke(builder);
         });
@@ -117,6 +119,8 @@ public static class EndpointHandler
         return webApplication;
     }
 
+    // but we still may need and Delegate builder to use with app.UseEndpoints api
+    [Obsolete("use UseEndpointHandler")]
     public static Delegate AutoDelegate<THandler>()
     {
         var handlerType = typeof(THandler);
@@ -135,11 +139,11 @@ public static class EndpointHandler
         var requestParameter = handlerType.GetMethod(nameof(IHandler<int, int>.HandleAsync))!.GetParameters().First()!;
         var options = new RequestOptions
         {
-            RequestType = requestParameter.ParameterType,
             Optional = IsOptional(requestParameter)
         };
 
         // Make the RequestOptions buildable, With an Action<RequestOptionsBuilder>? configure ??? see configure RequestBuilder further up
+        // Lets look into hooking up on the RouteHandlerBuilder, so we dont need to have multiple configure actions
 
         var method = typeof(EndpointHandler).GetMethod(nameof(Delegate), 3, new Type[] { typeof(RequestOptions) })!;
         method = method.MakeGenericMethod(handlerType, genericArguments[0], genericArguments[1]);
@@ -158,6 +162,7 @@ public static class EndpointHandler
         return nullabilityInfo?.ReadState == NullabilityState.Nullable;
     }
 
+    [Obsolete("use UseEndpointHandler")]
     public static Delegate UsingDelegateMethod<THandler, TRequest, TResponse>() where THandler : IHandler<TRequest, TResponse>
     {
         // When using the delegate method, we can let, minimal api do all the work with the deserialization aso..
@@ -184,6 +189,7 @@ public static class EndpointHandler
         // app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, ReadRessourceHandler handler) => await handler.HandleAsync(id, CancellationToken.None)));
     }
 
+    [Obsolete("use UseEndpointHandler")]
     public static RequestDelegate Delegate<THandler, TRequest, TResponse>(RequestOptions? options = null) where THandler : IHandler<TRequest, TResponse>
     {
         // use and rethink the whole options thing
@@ -231,6 +237,108 @@ public static class EndpointHandler
         });
     }
 }
+
+
+internal sealed class EndpointHandlerSpecification
+{
+    public Type HandlerType { get; }
+    public Type RequestType { get; }
+    public Type ResponseType { get; }
+
+    public bool RequestIsOptional { get; }
+
+    private EndpointHandlerSpecification(Type handlerType, Type requestType, Type responseType)
+    {
+        HandlerType = handlerType;
+        RequestType = requestType;
+        ResponseType = responseType;
+
+        var requestParameter = handlerType.GetMethod(nameof(IHandler<int, int>.HandleAsync))!.GetParameters().First()!;
+        RequestIsOptional = IsOptional(requestParameter);
+    }
+
+    public static EndpointHandlerSpecification Create<THandler>()
+    {
+        var handlerType = typeof(THandler);
+        var interfaceType = handlerType.GetInterfaces()
+            .Where(x => x.GetGenericTypeDefinition() == typeof(IHandler<,>))
+            .FirstOrDefault();
+
+        if (interfaceType == null)
+        {
+            throw new ArgumentException($"It is a requirement that <THandler> implement IHandler");
+        }
+
+        var genericArguments = interfaceType?.GetGenericArguments()!;
+
+        return new EndpointHandlerSpecification(handlerType, genericArguments[0], genericArguments[1]);
+    }
+
+    public Delegate Build()
+    {
+        var method = typeof(EndpointHandlerSpecification).GetMethod(nameof(Build), 3, new Type[0])!;
+        method = method.MakeGenericMethod(HandlerType, RequestType, ResponseType);
+
+        return (Delegate)method.Invoke(this, parameters: new object?[0])!;
+    }
+
+    public Delegate Build<THandler, TRequest, TResponse>() where THandler : IHandler<TRequest, TResponse>
+    {
+        // check that THandler, TRequest, TResponse match the expected types
+
+        return new RequestDelegate(async (context) =>
+        {
+            var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
+
+            IRequestReader reader = new DefaultReader(); ;
+            var httpRequest = context.Request;
+            TRequest request = default!;
+
+            // Also request should be able to come from body, querystring, routevalues and form? that'll be fun to implement
+            //switch (options?.DeserializeRequestFrom)
+            //{
+            //    case RequestOptions.RequestOrigin.QueryString:
+            //        reader = new QueryStringReader();
+            //        break;
+            //    case RequestOptions.RequestOrigin.RouteValues:
+            //        reader = new RouteValueReader();
+            //        break;
+            //    case RequestOptions.RequestOrigin.Form:
+            //        throw new NotSupportedException(":(");
+            //    case RequestOptions.RequestOrigin.TryThemAll:
+            //        throw new NotSupportedException(":(");
+            //    default:
+            //        reader = new JsonRequestReader();
+            //        break;
+            //}
+
+            request = await reader.ReadAsync<TRequest>(httpRequest);
+
+            if (request == null && !RequestIsOptional)
+            {
+                throw new ArgumentException($"Failed to deserialze non optional object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
+            }
+
+            var handler = context.RequestServices.GetRequiredService<THandler>();
+            var response = await handler.HandleAsync(request, CancellationToken.None);
+
+            if (response != null)
+            {
+                await context.Response.WriteAsJsonAsync(response);
+            }
+        });
+
+    }
+
+    private static bool IsOptional(ParameterInfo parameterInfo)
+    {
+        var context = new NullabilityInfoContext();
+        var nullabilityInfo = context.Create(parameterInfo);
+
+        return nullabilityInfo?.ReadState == NullabilityState.Nullable;
+    }
+}
+
 
 public interface IRequestReader
 {
@@ -336,7 +444,6 @@ public static class ServiceCollectionExtensions
 
 public sealed class RequestOptions
 {
-    public Type RequestType { get; set; } = null!;
     public bool Optional { get; set; }
 
     public enum RequestOrigin
