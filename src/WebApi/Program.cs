@@ -27,7 +27,7 @@ app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, Rea
 app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.AutoDelegate<ListItemsHandler>()));
 
 //app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get);
-app.UseEndpointHandlerExperimental<MyHandler>("/bam", HttpMethod.Get, x => x.AllowAnonymous());
+app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get, x => x.AllowAnonymous());
 
 app.UseEndpointHandler<HelloWorld>("/hello", HttpMethod.Get);
 
@@ -105,22 +105,11 @@ public sealed class RequestBuilder
 
 public static class EndpointHandler 
 {
-    public static WebApplication? UseEndpointHandler<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<IEndpointRouteBuilder>? configure = null)
-    {
-        webApplication?.UseEndpoints(builder =>
-        {
-            builder.MapMethods(pattern, new[] { httpMethod.Method }, AutoDelegate<THandler>());
-            configure?.Invoke(builder);
-        });
-
-        return webApplication;
-    }
-
-    public static WebApplication? UseEndpointHandlerExperimental<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<RouteHandlerBuilder>? configure = null)
+    public static WebApplication? UseEndpointHandler<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<RouteHandlerBuilder>? configure = null)
     {
         webApplication?.UseEndpoints(endpoints =>
         {
-            var builder = endpoints.MapMethods(pattern, new[] { httpMethod.Method }, (Delegate)AutoDelegate<THandler>());
+            var builder = endpoints.MapMethods(pattern, new[] { httpMethod.Method }, AutoDelegate<THandler>());
 
             configure?.Invoke(builder);
         });
