@@ -1,6 +1,3 @@
-using System.Linq.Expressions;
-using System.Reflection;
-using System.Web;
 using WebApi.Crud;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,13 +10,12 @@ var app = builder.Build();
 
 app.UseRouting();
 app.MapGet("/", () => "Hello World!");
+app.MapGet("/a", EndpointHandler.AutoDelegate<HomeHandler>());
 
 
 // lets drop the concept with RequestHandlers and make it EndpointHandlers
 
-app.UseEndpoints(configure => configure.MapGet("/test", EndpointHandler.Delegate<ReadRessourceHandler, int, MyResponse>()));
-app.UseEndpoints(configure => configure.MapGet("/test2", EndpointHandler.UsingDelegateMethod<ReadRessourceHandler, int, MyResponse>()));
-
+app.UseEndpoints(configure => configure.MapGet("/test/{id}", EndpointHandler.AutoDelegate<TestHandler>()));
 app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, ReadRessourceHandler handler) => await handler.HandleAsync(id, CancellationToken.None)));
 
 //app.UseEndpoints(configure => configure.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
@@ -37,7 +33,6 @@ app.AddCrud<Item>("/item", x =>
     x.AddCreate<ItemCreateHandler>();
     x.AddRead<ItemReadHandler, int>();
 });
-
 
 app.Run();
 
@@ -62,401 +57,38 @@ public class HelloWorld : IHandler<HelloWorld.Nothing?, HelloWorld.Response>
     }
 }
 
-
-public sealed class RequestBuilder
+// This responds to ../test/6d27e69f-e0b9-49d1-82c7-c177a410a0f9?text=hello world
+public class TestHandler : IHandler<TestHandler.Request, TestHandler.Response>
 {
-    public RequestBuilder AsOptional()
+    public async Task<Response> HandleAsync(Request request, CancellationToken cancellationToken)
     {
-        return this;
+        await Task.Yield();
+
+        request.Deconstruct(out var id, out var text);
+
+        return new Response(id, text ?? "Empty string");
     }
 
-    public RequestBuilder UseValue<T>(T value)
-    {
-        return this;
-    }
+    public record Request(Guid Id, string? Text);
 
-    public RequestBuilder FromQueryString(params string[] keys)
-    {
-        return this;
-    }
-
-    public RequestBuilder FromRoute(params string[] keys)
-    {
-        return this;
-    }
-
-    public RequestBuilder FromBody()
-    {
-        return this;
-    }
-
-    // construct the method that can do it, or keep the builder ?
-    //internal async Task<TRequest> CreateAsync<TRequest>(HttpRequest httpRequest)
-    //{
-        
-    //}
-
-    //internal Func<HttpRequest, Task<TRequest>> CreateBindingMethod()
-    //{
-
-    //}
+    public record Response(Guid Id, string Text);
 }
 
-public static class EndpointHandler 
+// Handler that uses the HttpRequest directly, could also be done by injekting IHttpContextAccessor
+public class HomeHandler : IHandler<HttpRequest, HomeHandler.Nothing?>
 {
-    public static WebApplication? UseEndpointHandler<THandler>(this WebApplication? webApplication, string pattern, HttpMethod httpMethod, Action<RouteHandlerBuilder>? configure = null)
+    public async Task<Nothing?> HandleAsync(HttpRequest request, CancellationToken cancellationToken)
     {
-        webApplication?.UseEndpoints(endpoints =>
-        {
-            var specification = EndpointHandlerSpecification.Create<THandler>();
-            var handler = specification.Build();
-            
-            var builder = endpoints.MapMethods(pattern, new[] { httpMethod.Method }, handler);
+        await request.HttpContext.Response.WriteAsync("Hello World");
 
-            configure?.Invoke(builder);
-        });
-
-        return webApplication;
+        return null;
     }
 
-    // but we still may need and Delegate builder to use with app.UseEndpoints api
-    [Obsolete("use UseEndpointHandler")]
-    public static Delegate AutoDelegate<THandler>()
-    {
-        var handlerType = typeof(THandler);
-        var interfaceType = handlerType.GetInterfaces()
-            .Where(x => x.GetGenericTypeDefinition() == typeof(IHandler<,>))
-            .FirstOrDefault();
+    public record Nothing { };
 
-        if(interfaceType == null)
-        {
-            throw new ArgumentException($"It is a requirement that <THandler> implement IHandler");
-        }
-        
-        var genericArguments = interfaceType?.GetGenericArguments()!;
-
-        // The first parameter in HandleAsync is the request.
-        var requestParameter = handlerType.GetMethod(nameof(IHandler<int, int>.HandleAsync))!.GetParameters().First()!;
-        var options = new RequestOptions
-        {
-            Optional = IsOptional(requestParameter)
-        };
-
-        // Make the RequestOptions buildable, With an Action<RequestOptionsBuilder>? configure ??? see configure RequestBuilder further up
-        // Lets look into hooking up on the RouteHandlerBuilder, so we dont need to have multiple configure actions
-
-        var method = typeof(EndpointHandler).GetMethod(nameof(Delegate), 3, new Type[] { typeof(RequestOptions) })!;
-        method = method.MakeGenericMethod(handlerType, genericArguments[0], genericArguments[1]);
-
-        var parameters = new object?[] { options };
-        var @delegate = method.Invoke(null, parameters: parameters)!;
-                
-        return (Delegate)@delegate;
-    }
-
-    private static bool IsOptional(ParameterInfo parameterInfo)
-    {
-        var context = new NullabilityInfoContext();
-        var nullabilityInfo = context.Create(parameterInfo);
-
-        return nullabilityInfo?.ReadState == NullabilityState.Nullable;
-    }
-
-    [Obsolete("use UseEndpointHandler")]
-    public static Delegate UsingDelegateMethod<THandler, TRequest, TResponse>() where THandler : IHandler<TRequest, TResponse>
-    {
-        // When using the delegate method, we can let, minimal api do all the work with the deserialization aso..
-        // but this also means that we are requred to use the attributes to ensure that argument match
-        
-        // In this case it means that the "request" argument will be deserialized from the querystring and must be called request
-        // this creates a dependency between the handler (in this case my endpoint handler) and the route.
-        return (async (TRequest request, THandler handler) =>
-        {
-           return await handler.HandleAsync(request, CancellationToken.None);
-        });
-
-        // The upside is that all the model binding is taken care of.
-        // https://github.com/dotnet/aspnetcore/blob/main/src/Http/Http.Extensions/src/RequestDelegateFactory.cs#L259
-
-        // Im having an existential cricis for this experimental playground, or at least the value of a EndpointHandler concept
-
-
-        // From above
-        // an integer is expected in the querystring, the UsingDelegateMethod defines this, the name is "request"
-        // app.UseEndpoints(configure => configure.MapGet("/test2", EndpointHandler.UsingDelegateMethod<ReadRessourceHandler, int, MyResponse>()));
-
-        // an integer is expected in the route, its defined in the route and the name must match the parameter in the delegate. this is the link
-        // app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, ReadRessourceHandler handler) => await handler.HandleAsync(id, CancellationToken.None)));
-    }
-
-    [Obsolete("use UseEndpointHandler")]
-    public static RequestDelegate Delegate<THandler, TRequest, TResponse>(RequestOptions? options = null) where THandler : IHandler<TRequest, TResponse>
-    {
-        // use and rethink the whole options thing
-
-        return new RequestDelegate(async (context) =>
-        {
-            var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
-
-            IRequestReader reader = new DefaultReader(); ;
-            var httpRequest = context.Request;
-            TRequest request = default!;
-
-            // Also request should be able to come from body, querystring, routevalues and form? that'll be fun to implement
-            switch (options?.DeserializeRequestFrom)
-            {
-                case RequestOptions.RequestOrigin.QueryString:
-                    reader = new QueryStringReader();
-                    break;
-                case RequestOptions.RequestOrigin.RouteValues:
-                    reader = new RouteValueReader();
-                    break;
-                case RequestOptions.RequestOrigin.Form:
-                    throw new NotSupportedException(":(");
-                case RequestOptions.RequestOrigin.TryThemAll:
-                    throw new NotSupportedException(":(");
-                default:
-                    reader = new JsonRequestReader();
-                    break;
-            }
-
-            request = await reader.ReadAsync<TRequest>(httpRequest);
-
-            if (request == null && options?.Optional != true)
-            {
-                throw new ArgumentException($"Failed to deserialze non optional object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
-            }
-                        
-            var handler = context.RequestServices.GetRequiredService<THandler>();
-            var response = await handler.HandleAsync(request, CancellationToken.None);
-
-            if (response != null)
-            {
-                await context.Response.WriteAsJsonAsync(response);
-            }
-        });
-    }
 }
 
 
-internal sealed class EndpointHandlerSpecification
-{
-    public Type HandlerType { get; }
-    public Type RequestType { get; }
-    public Type ResponseType { get; }
-
-    public bool RequestIsOptional { get; }
-
-    private EndpointHandlerSpecification(Type handlerType, Type requestType, Type responseType)
-    {
-        HandlerType = handlerType;
-        RequestType = requestType;
-        ResponseType = responseType;
-
-        var requestParameter = handlerType.GetMethod(nameof(IHandler<int, int>.HandleAsync))!.GetParameters().First()!;
-        RequestIsOptional = IsOptional(requestParameter);
-    }
-
-    public static EndpointHandlerSpecification Create<THandler>()
-    {
-        var handlerType = typeof(THandler);
-        var interfaceType = handlerType.GetInterfaces()
-            .Where(x => x.GetGenericTypeDefinition() == typeof(IHandler<,>))
-            .FirstOrDefault();
-
-        if (interfaceType == null)
-        {
-            throw new ArgumentException($"It is a requirement that <THandler> implement IHandler");
-        }
-
-        var genericArguments = interfaceType?.GetGenericArguments()!;
-
-        return new EndpointHandlerSpecification(handlerType, genericArguments[0], genericArguments[1]);
-    }
-
-    public Delegate Build()
-    {
-        var method = typeof(EndpointHandlerSpecification).GetMethod(nameof(Build), 3, new Type[0])!;
-        method = method.MakeGenericMethod(HandlerType, RequestType, ResponseType);
-
-        return (Delegate)method.Invoke(this, parameters: new object?[0])!;
-    }
-
-    public Delegate Build<THandler, TRequest, TResponse>() where THandler : IHandler<TRequest, TResponse>
-    {
-        // check that THandler, TRequest, TResponse match the expected types
-
-        return new RequestDelegate(async (context) =>
-        {
-            var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
-
-            IRequestReader reader = new DefaultReader(); ;
-            var httpRequest = context.Request;
-            TRequest request = default!;
-
-            // Also request should be able to come from body, querystring, routevalues and form? that'll be fun to implement
-            //switch (options?.DeserializeRequestFrom)
-            //{
-            //    case RequestOptions.RequestOrigin.QueryString:
-            //        reader = new QueryStringReader();
-            //        break;
-            //    case RequestOptions.RequestOrigin.RouteValues:
-            //        reader = new RouteValueReader();
-            //        break;
-            //    case RequestOptions.RequestOrigin.Form:
-            //        throw new NotSupportedException(":(");
-            //    case RequestOptions.RequestOrigin.TryThemAll:
-            //        throw new NotSupportedException(":(");
-            //    default:
-            //        reader = new JsonRequestReader();
-            //        break;
-            //}
-
-            request = await reader.ReadAsync<TRequest>(httpRequest);
-
-            if (request == null && !RequestIsOptional)
-            {
-                throw new ArgumentException($"Failed to deserialze non optional object of {typeof(TRequest).Name} from HTTP request using {reader.GetType().Name}");
-            }
-
-            var handler = context.RequestServices.GetRequiredService<THandler>();
-            var response = await handler.HandleAsync(request, CancellationToken.None);
-
-            if (response != null)
-            {
-                await context.Response.WriteAsJsonAsync(response);
-            }
-        });
-
-    }
-
-    private static bool IsOptional(ParameterInfo parameterInfo)
-    {
-        var context = new NullabilityInfoContext();
-        var nullabilityInfo = context.Create(parameterInfo);
-
-        return nullabilityInfo?.ReadState == NullabilityState.Nullable;
-    }
-}
-
-
-public interface IRequestReader
-{
-    Task<T> ReadAsync<T>(HttpRequest httpRequest);
-}
-
-public class DefaultReader : IRequestReader
-{
-    public Task<T> ReadAsync<T>(HttpRequest httpRequest)
-    {
-        return Task.FromResult<T>(default!);
-    }
-}
-
-public class QueryStringReader : IRequestReader
-{
-    public Task<T> ReadAsync<T>(HttpRequest httpRequest)
-    {
-        string responseString = httpRequest.QueryString.ToString();
-        var dict = HttpUtility.ParseQueryString(responseString);
-
-        // TODO if we only have one value and T is an basic value type, then return the value directly
-        // we could share that logic with the Route value reader.. and also the json part can be used to deserialize into 
-        // a complex type for both readers
-
-        string json = System.Text.Json.JsonSerializer.Serialize(dict.Cast<string>().ToDictionary(k => k, v => dict[v]));
-
-        return Task.FromResult(System.Text.Json.JsonSerializer.Deserialize<T>(json)!);
-    }
-}
-
-public class RouteValueReader : IRequestReader
-{
-    public Task<T> ReadAsync<T>(HttpRequest httpRequest)
-    {
-        T result = default!;
-
-        var value = httpRequest.RouteValues.FirstOrDefault().Value;
-        if (value != default)
-        {
-            if (typeof(T) == typeof(int) && value is string str)
-            {
-                object integer = Convert.ToInt32(str);
-
-                result = (T)integer;
-            }
-
-            if (typeof(T) == typeof(string) && value is string)
-            {
-                result = (T)value;
-            }
-
-            // handle guid ? is that valid as a route param?
-
-            // T is a complex type deserialize into T using route names ?
-        }
-
-        return Task.FromResult(result);
-    }
-}
-
-
-public class JsonRequestReader : IRequestReader
-{
-    public async Task<T> ReadAsync<T>(HttpRequest httpRequest)
-    {
-        T result = default!;
-        try
-        {
-            var value = await httpRequest.ReadFromJsonAsync<T>();
-
-            result = value!;
-        }
-        catch
-        {
-            // buhuu do this smarter
-            result = default!;
-        }
-
-        return result;
-    }
-}
-
-public static class ServiceCollectionExtensions
-{
-    public static IServiceCollection AddEndpointHandlers(this IServiceCollection serviceCollection)
-    {
-        var type = typeof(IHandler<,>);
-        var handlerTypes = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(x => x.DefinedTypes)
-            .Where(x=>x.IsClass && !x.IsAbstract)
-            .Where(x => x.ImplementedInterfaces.Any(y => y.IsGenericType && y.GetGenericTypeDefinition() == type));
-
-        foreach (var handlerType in handlerTypes)
-        {
-            serviceCollection.AddScoped(handlerType);
-        }
-
-        return serviceCollection;
-    }
-}
-
-
-public sealed class RequestOptions
-{
-    public bool Optional { get; set; }
-
-    public enum RequestOrigin
-    {
-        Body,
-        QueryString,
-        RouteValues,
-        Form,
-        TryThemAll // ?
-    }
-
-    public RequestOrigin DeserializeRequestFrom { get; init; } = RequestOrigin.Body;
-}
 
 // Do we need all the combinations - does that even make any sense ?
 // nothing in, nothing out

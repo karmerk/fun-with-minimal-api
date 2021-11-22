@@ -42,12 +42,13 @@
 
         public ICrudBuilder<T> AddRead<THandler, TKey>(Func<T, TKey>? selector = null) where THandler : IHandler<TKey, T>
         {
-            var options = new RequestOptions()
-            {
-                DeserializeRequestFrom = RequestOptions.RequestOrigin.RouteValues
-            };
+            // incompatible with the current experimental work
+            //var options = new RequestOptions()
+            //{
+            //DeserializeRequestFrom = RequestOptions.RequestOrigin.RouteValues
+            //};
 
-            _webApplication.UseEndpoints(configure => configure.MapMethods($"{_pattern}/{{key}}", new[] { "GET" }, EndpointHandler.Delegate<THandler, TKey, T>(options)));
+            //_webApplication.UseEndpoints(configure => configure.MapMethods($"{_pattern}/{{key}}", new[] { "GET" }, EndpointHandler.Delegate<THandler, TKey, T>()));
 
             return this;
         }
