@@ -63,49 +63,52 @@ public static class EndpointHandler
     {
         // check that THandler, TRequest, TResponse match the expected types
 
-        // direct accessor
-        if (typeof(TRequest) == typeof(HttpRequest))
-        {
-            return new RequestDelegate(async (context) =>
-            {
-                var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
-
-                var httpRequest = (TRequest)((object)context.Request);
-                var handler = context.RequestServices.GetRequiredService<THandler>();
-                var response = await handler.HandleAsync(httpRequest, CancellationToken.None);
-                if (response != null)
-                {
-                    await context.Response.WriteAsJsonAsync(response);
-                }
-            });
-        }
-
-
         return new RequestDelegate(async (context) =>
         {
             var logger = context.RequestServices.GetRequiredService<ILogger<THandler>>();
-                       
             var httpRequest = context.Request;
-            var deserializer = context.RequestServices.GetService<RequestDeserializer>() ?? new RequestDeserializer();
-            var request = await deserializer.DeserializeAsync<TRequest>(httpRequest, specification.RequestIsOptional);
 
-            if (request == null && !specification.RequestIsOptional)
+            if (!RequestIsHttpRequest<TRequest>(httpRequest, out var request))
             {
-                throw new ArgumentException($"Failed to deserialze non optional object of {typeof(TRequest).Name} from HTTP request");
+                // complex object deserializer - should we have an option for basic types. string/guid/int
+                // as it is now, the handlers must make a complex object with properties matching route+querystring args
+                var deserializer = context.RequestServices.GetService<RequestDeserializer>() ?? new RequestDeserializer();
+
+                request = await deserializer.DeserializeAsync<TRequest>(httpRequest, specification.RequestIsOptional);
+
+                if (request == null && !specification.RequestIsOptional)
+                {
+                    throw new ArgumentException($"Failed to deserialze non optional object of {typeof(TRequest).Name} from HTTP request");
+                }
             }
 
             var handler = context.RequestServices.GetRequiredService<THandler>();
             var response = await handler.HandleAsync(request, CancellationToken.None);
 
-            // TODO.. need to hook into that RouteHandlerBuilder in order to known how to return the object
-            if (response != null)
+            if(response is IResult result)
             {
-                await context.Response.WriteAsJsonAsync(response);
+                await result.ExecuteAsync(context);
+            }
+            else if (response != null)
+            {
+                await Results.Json(response).ExecuteAsync(context);
             }
         });
 
     }
 
+    public static bool RequestIsHttpRequest<TRequest>(HttpRequest httpRequest, out TRequest request)
+    {
+        if (typeof(TRequest) == typeof(HttpRequest))
+        {
+            object obj = httpRequest;
+
+            request = (TRequest)obj;
+            return true;
+        }
+        request = default!;
+        return false;
+    }
 
     public interface IRequestDeserializer
     {

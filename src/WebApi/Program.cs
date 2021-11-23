@@ -75,13 +75,14 @@ public class TestHandler : IHandler<TestHandler.Request, TestHandler.Response>
 }
 
 // Handler that uses the HttpRequest directly, could also be done by injekting IHttpContextAccessor
-public class HomeHandler : IHandler<HttpRequest, HomeHandler.Nothing?>
+public class HomeHandler : IHandler<HttpRequest, IResult>
 {
-    public async Task<Nothing?> HandleAsync(HttpRequest request, CancellationToken cancellationToken)
+    public async Task<IResult> HandleAsync(HttpRequest request, CancellationToken cancellationToken)
     {
-        await request.HttpContext.Response.WriteAsync("Hello World");
+        //await request.HttpContext.Response.WriteAsync("Hello World");
+        await Task.Yield();
 
-        return null;
+        return Results.Content("Hello world!");
     }
 
     public record Nothing { };
@@ -143,7 +144,6 @@ public class ReadRessourceHandler : IHandler<int, MyResponse>
         return Task.FromResult(response);
     }
 }
-
 
 public sealed class ListItemsHandler : IHandler<object?, IEnumerable<Item>>
 {
