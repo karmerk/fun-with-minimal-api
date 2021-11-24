@@ -1,8 +1,8 @@
+using Microsoft.AspNetCore.Mvc;
 using WebApi.Crud;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSingleton<Items>(_ => new Items(3));
 builder.Services.AddEndpointHandlers();
 builder.Services.AddHttpContextAccessor();
 
@@ -12,27 +12,27 @@ app.UseRouting();
 app.MapGet("/", () => "Hello World!");
 app.MapGet("/a", EndpointHandler.AutoDelegate<HomeHandler>());
 
-
-// lets drop the concept with RequestHandlers and make it EndpointHandlers
-
-app.UseEndpoints(configure => configure.MapGet("/test/{id}", EndpointHandler.AutoDelegate<TestHandler>()));
-app.UseEndpoints(configure => configure.MapGet("/test3/{id}", async (int id, ReadRessourceHandler handler) => await handler.HandleAsync(id, CancellationToken.None)));
-
 //app.UseEndpoints(configure => configure.MapPost("/bam", EndpointHandler.Delegate<MyHandler, MyRequest, MyResponse>()));
 //app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.Delegate<ListItemsHandler, object?, IEnumerable<Item>>()));
 app.UseEndpoints(configure => configure.MapGet("/items", EndpointHandler.AutoDelegate<ListItemsHandler>()));
 
-//app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get);
 app.UseEndpointHandler<MyHandler>("/bam", HttpMethod.Get, x => x.AllowAnonymous());
-
 app.UseEndpointHandler<HelloWorld>("/hello", HttpMethod.Get);
 
-// Add Crud
-app.AddCrud<Item>("/item", x =>
+// some standard endpoints
+app.UseEndpoints(endpoints =>
 {
-    x.AddCreate<ItemCreateHandler>();
-    x.AddRead<ItemReadHandler, int>();
+    endpoints.MapGet("/world", async (HelloWorld handler) => await handler.HandleAsync(null, CancellationToken.None));
+    endpoints.MapGet("/test", async ([FromBody]TestHandler.Request request, TestHandler handler) => await handler.HandleAsync(request, CancellationToken.None));
 });
+
+
+// Leaving the crud experiments for now
+// Add Crud
+//app.AddCrud<Item>("/items/{id}", x =>
+//{
+//    x.AddCreate<CreateHandler>();
+//});
 
 app.Run();
 
@@ -124,96 +124,21 @@ public class MyHandler : IHandler<MyRequest, MyResponse>
     }
 }
 
-public class ReadRessourceHandler : IHandler<int, MyResponse>
+public record ListRequest(int Page, int? PageSize);
+public record Item(int Id, string Name);
+
+public sealed class ListItemsHandler : IHandler<ListRequest?, IEnumerable<Item>>
 {
-    private readonly ILogger<ReadRessourceHandler> _logger;
-    private readonly IHttpContextAccessor _httpContextAccessor;
-
-    public ReadRessourceHandler(ILogger<ReadRessourceHandler> logger, IHttpContextAccessor httpContextAccessor /* just to show that DI works*/)
+    public async Task<IEnumerable<Item>> HandleAsync(ListRequest? request, CancellationToken cancellationToken)
     {
-        _logger = logger;
-        _httpContextAccessor = httpContextAccessor;
+        await Task.Yield();
+
+        var page = request?.Page ?? 0;
+        var size = request?.PageSize ?? 50;
+        
+        return UnlimitedOrderedItems.Skip(page * size).Take(size);
     }
 
-    public Task<MyResponse> HandleAsync(int id, CancellationToken cancellationToken)
-    {
-        _logger.LogInformation($"ReadRessourceHandler.HandleAsync: {id}");
-
-        var response = new MyResponse($"{id}", "Read");
-
-        return Task.FromResult(response);
-    }
+    // Really not unlimited - "only" 1 mio items
+    private IEnumerable<Item> UnlimitedOrderedItems => Enumerable.Range(1, 1000000).Select(x => new Item(x, $"Item number {x}"));
 }
-
-public sealed class ListItemsHandler : IHandler<object?, IEnumerable<Item>>
-{
-    private readonly Items _items;
-
-    public ListItemsHandler(Items items)
-    {
-        _items = items;
-    }
-
-    public async Task<IEnumerable<Item>> HandleAsync(object? request, CancellationToken cancellationToken)
-    {
-        await Task.CompletedTask; // Awesome
-
-        return _items.Values.Values; // Values.Values :)
-    }
-}
-
-
-
-// Playing around with CRUD
-
-public record Item(int Id, string Name)
-{
-}
-
-public sealed class Items
-{
-    public IDictionary<int, Item> Values { get; } = new Dictionary<int,Item>();
-
-    public Items(int count)
-    {
-        foreach(var id in Enumerable.Range(1, count))
-        {
-            Values.Add(id, new Item(id, $"Name + {id}"));
-        }
-    }
-}
-
-public sealed class ItemCreateHandler : IHandler<Item, Item>
-{
-    private readonly Items _items;
-
-    public ItemCreateHandler(Items items)
-    {
-        _items = items;
-    }
-
-    public Task<Item> HandleAsync(Item request, CancellationToken cancellationToken)
-    {
-        _items.Values.Add(request.Id, request);
-
-        return Task.FromResult(request);
-    }
-}
-
-public sealed class ItemReadHandler : IHandler<int, Item>
-{
-    private readonly Items _items;
-
-    public ItemReadHandler(Items items)
-    {
-        _items = items;
-    }
-
-    public Task<Item> HandleAsync(int request, CancellationToken cancellationToken)
-    {
-        var response = _items.Values[request];
-
-        return Task.FromResult(response);
-    }
-}
-

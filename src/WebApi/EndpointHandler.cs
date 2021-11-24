@@ -1,5 +1,14 @@
 ﻿using System.Web;
 
+public static class RouteHandlerBuilderExtensions
+{
+    public static RouteHandlerBuilder QueryString(this RouteHandlerBuilder builder) 
+    {
+        return builder;
+    }
+}
+
+
 public static class EndpointHandler
 {
     // This is what i want as the primary API
@@ -94,7 +103,6 @@ public static class EndpointHandler
                 await Results.Json(response).ExecuteAsync(context);
             }
         });
-
     }
 
     public static bool RequestIsHttpRequest<TRequest>(HttpRequest httpRequest, out TRequest request)
@@ -117,6 +125,12 @@ public static class EndpointHandler
 
     public sealed class RequestDeserializer : IRequestDeserializer
     {
+        public System.Text.Json.JsonSerializerOptions _options = new System.Text.Json.JsonSerializerOptions()
+        {
+            PropertyNameCaseInsensitive = true,
+            NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
+        };
+
         public async Task<TRequest> DeserializeAsync<TRequest>(HttpRequest httpRequest, bool optional)
         {
             TRequest request = default!;
@@ -145,12 +159,12 @@ public static class EndpointHandler
             {
                 // Deserialize from querystring and route values
                 var json = System.Text.Json.JsonSerializer.Serialize(values);
-                request = System.Text.Json.JsonSerializer.Deserialize<TRequest>(json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+                request = System.Text.Json.JsonSerializer.Deserialize<TRequest>(json, _options)!;
             }
             else if (httpRequest.HasJsonContentType())
             {
                 // Deserialize from JSON body
-                request = await httpRequest.ReadFromJsonAsync<TRequest>() ?? throw new BadHttpRequestException($"Failed to deserialize object {typeof(TRequest).Name} from JSON body");
+                request = await httpRequest.ReadFromJsonAsync<TRequest>(_options) ?? throw new BadHttpRequestException($"Failed to deserialize object {typeof(TRequest).Name} from JSON body");
             }
 
             return request;
